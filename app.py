@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from flask import Flask, request
 from dotenv import load_dotenv
 import os
@@ -9,41 +10,44 @@ from models import Session, Reminder
 from ai_parser import parse_message
 from datetime import datetime
 from twilio.twiml.messaging_response import MessagingResponse
-import scheduler
 import pytz
 
-
-
-
 app = Flask(__name__)
-
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
-    message = request.form.get("Body").lower().strip()
+    message = request.form.get("Body", "").strip()
     sender = request.form.get("From")
 
     resp = MessagingResponse()
 
-    # ⭐ LIST COMMAND
-    if message == "list reminders":
+    # LIST COMMAND
+    if message.lower() == "list reminders":
         reply = list_reminders(sender)
         resp.message(reply)
         return str(resp)
 
-    # ⭐ Otherwise create reminder
+    # Otherwise create reminder via OpenAI parser
     data = parse_message(message)
 
-    task = data["task"]
-    tz = pytz.timezone("Asia/Kolkata")
+    if data.get("needs_clarification") or not data.get("datetime") or not data.get("task"):
+        resp.message("I couldn't clearly understand the reminder. Can you rephrase?")
+        return str(resp)
+
+    task = data.get("task")
+    iso_dt = data.get("datetime")
+
+    if not iso_dt or not task:
+        resp.message("I could not clearly understand the reminder. Please rephrase.")
+        return str(resp)
 
     IST = pytz.timezone("Asia/Kolkata")
 
-    time = datetime.fromisoformat(data["datetime"])
+    time = datetime.fromisoformat(iso_dt)
 
-    # Convert user input IST → UTC before storing
+    # Convert user input IST -> UTC before storing
     if time.tzinfo is None:
         time = IST.localize(time)
 
@@ -51,23 +55,27 @@ def webhook():
 
     session = Session()
 
-    reminder = Reminder(
-        phone=sender,
-        task=task,
-        reminder_time=time
-    )
+    try:
+        reminder = Reminder(
+            phone=sender,
+            task=task,
+            reminder_time=time
+        )
 
-    session.add(reminder)
-    session.commit()
-
-    IST = pytz.timezone("Asia/Kolkata")
+        session.add(reminder)
+        session.commit()
+    finally:
+        session.close()
 
     display_time = time.astimezone(IST)
 
-    resp.message(
-        f"✅ Reminder set\n\nTask: {task}\nTime: {display_time.strftime('%d %b %I:%M %p')}"
+    reply_message = (
+    "Reminder set\n\n"
+    f"Task: {task}\n"
+    f"Time: {display_time.strftime('%d %b %I:%M %p')}"
     )
 
+    resp.message(reply_message)
     return str(resp)
 
 
@@ -86,25 +94,19 @@ def list_reminders(phone):
         )
 
         if not reminders:
-            return "📭 No active reminders."
+            return "No active reminders."
 
-        message = "📋 Your Reminders:\n\n"
+        message = "Your Reminders:\n\n"
 
         for r in reminders:
-
-            # ⭐ Convert to IST if timezone missing
-            time = r.reminder_time
-            time = r.reminder_time.replace(tzinfo=pytz.utc)
-            time = time.astimezone(IST)
-
+            time = r.reminder_time.replace(tzinfo=pytz.utc).astimezone(IST)
             message += f"{r.id}. {r.task}\n"
-            message += f"   ⏰ {time.strftime('%d %b %I:%M %p')}\n\n"
+            message += f"   {time.strftime('%d %b %I:%M %p')}\n\n"
 
         return message
 
     finally:
         session.close()
-
 
 
 if __name__ == "__main__":
